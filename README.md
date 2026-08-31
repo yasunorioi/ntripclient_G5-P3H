@@ -73,11 +73,13 @@ Atom の Grove(HY2.0) → mosaic COM1。**両側とも 3.3V LVTTL なので、�
    - `setNMEAOutput, Stream2, COM1, GGA, sec1`（Atom の fix-LED 用）
    `$R:` ack までリトライ、~30s で諦めて転送（ベストエフォート）。
 
-> ⚠ **重要な実機知見**：この P3H の **COM1 は ASCII コマンドに応答しない**（`$R:` も
-> `$R?` も返らない＝input が RTCMv3 専用でコマンド解釈しない）。RTCM3 入力・GGA 出力は
-> 保存設定で完動するが、**Atom からコマンドで COM2 等を再構成することはできない**。
-> コマンド駆動の自己構成／後述の COM2 変更を効かせたい場合は、受信機の
-> **COM1 input を `auto` に**しておく（RxTools/USB で一度）か、コマンドを受ける個体を使う。
+> ⚠ **重要な実機知見（結論）**：この P3H は、Atom が使う共有 UART（RTCM3 入力＋GGA 出力が
+> 同時に流れる COM）上では **ASCII コマンドに `$R:` を返さない**。COM1 input を `auto` に
+> 変えても（RxTools/USB で確認済み）**Atom からのコマンドは無応答のまま**だった
+> （auto 検出が RTCM3 入力にロックしてコマンド解釈に切り替わらない挙動と推測）。
+> → **Atom からの自己構成／後述の Web COM2 変更はこの個体では受信機に届かない。**
+> **受信機の設定は RxTools/USB で行い boot config に保存する**のが確実（＝上記①の運用）。
+> USB からのコマンド設定手順は本 README 末尾「受信機を USB で設定する」を参照。
 
 前提：**COM1 は既定 115200**（`MOSAIC_COM1_BAUD`）。RTCM3 入力は Septentrio 既定の
 auto 使用に依存（明示コマンド無しで補正が効く）。`PROVISION_MOSAIC 0` で自己構成を無効化。
@@ -131,6 +133,31 @@ fix 状態は mosaic COM1 から返る GGA を読んで色分けする。
 | 薄白 | GGA まだ来ず（fix 不明） |
 | レインボー | 補正ストール（>5s RTCM3 途絶） |
 | 赤 | 起動直後 / WiFi 断（3分で再起動） |
+
+## 受信機を USB で設定する（確実な方法）
+
+mosaic-go を PC の USB に挿すと 2つの CDC ポートが出る（`/dev/ttyACM0`=USB1=コマンド港,
+`/dev/ttyACM1`=USB2）。**ttyACM0 に Septentrio コマンドを送って設定し、boot config に保存**する。
+実際にこの構成で動作確認した手順（115200・CR/LF 終端・応答は `$R:`）：
+
+```
+# COM1 = Atom（RTCM3 入力＋LED 用 GGA 出力, 115200）
+setDataInOut,   COM1, auto                     # 入力を auto（RTCM3＋コマンド）
+setNMEAOutput,  Stream1, COM1, GGA, sec1        # GGA を Atom へ
+# COM2 = トラクタ（GGA 出力, 38400）
+setNMEAOutput,  Stream2, COM2, GGA, sec1
+setCOMSettings, COM2, baud38400
+# 恒久化（電源再投入後も維持。これをしないと NMEA 設定は current-config で消える）
+exeCopyConfigFile, Current, Boot
+# 確認
+getNMEAOutput / getCOMSettings / getDataInOut / getSBFOutput
+```
+
+> ⚠ **NMEA 出力は current-config だと電源再投入で消える**（実際に消えて fix が落ちた）。
+> 必ず `exeCopyConfigFile, Current, Boot` で保存する。SBF 出力は COM1/COM2 では off に
+> しておく（トラクタの 38400 を GGA だけにして圧迫させない）。COM2 の baud を変える前に、
+> **Atom がどちらの COM に繋がっているか**を必ず確認（Atom=COM1@115200 前提。逆だと Atom の
+> baud が合わず fix が出なくなる）。
 
 ## 流用元
 
