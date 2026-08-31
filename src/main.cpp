@@ -380,9 +380,10 @@ button{margin-top:.8rem;padding:.5rem 1rem}
 <label>Mountpoint<input name=mount></label>
 <label>User (optional)<input name=user></label>
 <label>Pass (optional)<input name=pass></label>
-<label>COM2 baud (to tractor)<input name=com2_baud></label>
-<label>COM2 NMEA (e.g. GGA or GGA+VTG)<input name=com2_nmea></label>
 <button>Save &amp; apply</button></form>
+<!-- COM2 (tractor) baud/NMEA are set on the receiver via RxTools/USB and saved to
+     boot config — not editable here (this P3H doesn't answer commands on the shared
+     RTCM+GGA UART). See README "受信機を USB で設定する". -->
 <form method=POST action=/reboot style=display:inline><button>Reboot</button></form>
 <form method=POST action=/wifireset style=display:inline><button>Forget WiFi</button></form>
 <script>
@@ -396,7 +397,7 @@ document.getElementById('s').innerHTML=
   (d.fix.fresh?'':'  (stale)')+'\n'+
 'Prov  '+(d.prov=='done'?'<span class=g>done</span>':d.prov=='wait'?'<span class=r>waiting…</span>':'gave up')+
 '\nUp    '+d.up+' s';
-for(let k of ['host','port','mount','user','pass','com2_baud','com2_nmea'])
+for(let k of ['host','port','mount','user','pass'])
   {let e=document.querySelector('[name='+k+']');if(e&&!e.dataset.t)e.value=d.cfg[k];}}
 u();setInterval(u,2000);
 document.querySelectorAll('input').forEach(e=>e.addEventListener('input',()=>e.dataset.t=1));
