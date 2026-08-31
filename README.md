@@ -21,6 +21,31 @@ Atom はヘッドレスの純フォワーダ（表示・cut/fill は持たない
  mosaic-go COM2 ──► NMEA GGA @38400 ──► トラクタ・ガイダンス   (mosaic が直接出力・Atom は非関与)
 ```
 
+## セットアップ（初回）
+
+1. **配線する**（→[配線](#配線)）。Atom G26/G32 ↔ mosaic COM1（3.3V TTL 直結）、
+   mosaic COM2 → トラクタ（RS232 なら在庫トランシーバ）、mosaic は別途 5V 給電。
+
+2. **受信機（mosaic-go）を一度だけ準備する**。運用に応じて2択：
+
+   - **A. Atom に任せる（工場出荷から・COM2 を Web で選びたいならこちら）**
+     RxTools/web で **COM1 の input を `auto`** にして保存するだけ。以降 Atom が毎起動で
+     COM1/COM2 の NMEA 出力を自己構成し、**COM2 の baud/NMEA は Web UI から選べる**。
+     `auto` は RTCM3 補正の受理と ASCII コマンドの両方を通す。
+     > ⚠ COM1 が RTCMv3 専用だと**コマンドを黙殺**する（実機の P3H がこれ）。その場合は B へ。
+
+   - **B. 受信機側で作り込む（コマンド非対応の個体・割り切り運用）**
+     RxTools で COM1＝RTCM3入力＋GGA出力、COM2＝希望 baud＋NMEA出力 を設定し
+     **boot config に保存**。Atom は GGA を検知して転送＋監視に専念（自己構成しない）。
+
+3. **焼く**（→[ビルド / 焼き](#ビルド--焼き)）。`pio run -t upload`。
+
+4. **WiFi と NTRIP を設定する**。起動時に本体ボタン長押し → SSID `NTRIP-Client` の
+   ポータルで WiFi creds＋NTRIP を投入。以降は稼働中に **http://ntrip-rover.local/** で変更可。
+
+5. **確認する**。LED が**緑＝RTK fixed**。`http://ntrip-rover.local/` の status で
+   NTRIP connected / RTCM バイト / fix=RTK-FIX を確認。
+
 ## 配線
 
 Atom の Grove(HY2.0) → mosaic COM1。**両側とも 3.3V LVTTL なので、このレグにレベル変換は不要**（3本）。
