@@ -43,9 +43,11 @@ mosaic は「**SBF/出力ストリーム開始前の静かな窓**」でしか�
 受信機側で**一度設定して boot config に保存**しておくのが堅い（Atom を毎起動で
 provisioning させる必要がなくなり、フォワーダを単純に保てる）。web UI / RxTools で：
 
-- **COM1**: RTCM3 補正を差分ソースとして受理（`setRTCMInput` / 既定 auto）。COM1 baud は
+- **COM1** @115200: RTCM3 補正を差分ソースとして受理（`setRTCMInput` / 既定 auto）**かつ
+  NMEA GGA を出力**（例 `setNMEAOutput, Stream2, COM1, GGA, sec1`）。GGA を COM1 に返すのは
+  Atom が **fix 状態を読んで LED に反映**するため（下記 LED 参照）。COM1 baud は
   `MOSAIC_COM1_BAUD`(既定 115200) に合わせる。
-- **COM2**: baud **38400**、**NMEA GGA** を出力（例 `setNMEAOutput, Stream1, COM2, GGA, sec1`）。
+- **COM2** @38400: **NMEA GGA** を出力（例 `setNMEAOutput, Stream1, COM2, GGA, sec1`）→ トラクタへ。
 - 設定後 **boot config に保存**（`exeCopyConfigFile, Current, Boot`）。
 
 > この G5 P3H は rover 専用個体（permission に RTKBase 無し・RTCM3 は入力のみ）。
@@ -61,18 +63,29 @@ pio run -t upload       # flash (upload_speed=115200)
 pio device monitor      # 115200
 ```
 
-初回 WiFi 設定：起動時に**本体ボタンを長押し**すると設定ポータル（SSID `NTRIP-Client`）。
-以後は保存済み creds で自動接続。
+**設定ポータル**：起動時に**本体ボタンを長押し**すると SSID `NTRIP-Client` のポータルが開き、
+WiFi に加えて **NTRIP のホスト/ポート/マウント/ユーザ/パス**も設定できる（NVS 保存＝別現場・
+別基準局へ焼き直し無しで移動可）。押さなければ保存済み設定で自動接続。既定は
+`rtk.toiso.fit:2101/eniwa-bd982`（anonymous）。
+
+**再接続**：WiFi/NTRIP 断は**その場でリトライ**（再起動しない）。最後の砦として WiFi が
+3分以上復帰しない時だけ再起動。
 
 ## LED
 
+fix 状態は mosaic COM1 から返る GGA を読んで色分けする。
+
 | 色 | 意味 |
 |---|---|
-| 赤 | 起動中 / 失敗（再起動へ） |
-| 黄 | WiFi 接続中 |
 | 青 | 設定ポータル |
-| 緑 | RTCM3 転送中（正常） |
-| レインボー | ストール（>5s RTCM3 途絶、>30s で自動再起動） |
+| 黄 | WiFi 接続中 |
+| マゼンタ | NTRIP 接続中 |
+| **緑** | **RTK fixed**（GGA quality=4） |
+| シアン | RTK float（quality=5） |
+| 橙 | 補正は流れているが未 fix（DGPS/GPS/なし） |
+| 薄白 | GGA まだ来ず（fix 不明） |
+| レインボー | 補正ストール（>5s RTCM3 途絶） |
+| 赤 | 起動直後 / WiFi 断（3分で再起動） |
 
 ## 流用元
 
