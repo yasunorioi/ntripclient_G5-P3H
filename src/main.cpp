@@ -36,10 +36,14 @@
 #include <WiFiManager.h>
 #include <FastLED.h>
 #include <Preferences.h>
+#include <WebServer.h>
+#include <ESPmDNS.h>
 #include "NTRIPClient.h"
 
 NTRIPClient ntrip_c;
 Preferences prefs;
+WebServer server(80);
+#define MDNS_NAME "ntrip-rover"   // reachable as http://ntrip-rover.local/
 
 // M5Atom Lite onboard WS2812 LED
 #define LED_PIN 27
@@ -108,6 +112,10 @@ void saveConfig() {
 
 // ---- Fix state (from GGA readback) ----
 enum FixQ { FIX_NONE = 0, FIX_GPS = 1, FIX_DGPS = 2, FIX_RTK_FIXED = 4, FIX_RTK_FLOAT = 5 };
+const char* fixStr(int q) {
+  switch (q) { case FIX_RTK_FIXED: return "RTK-FIX"; case FIX_RTK_FLOAT: return "RTK-FLT";
+               case FIX_DGPS: return "DGPS";      case FIX_GPS: return "GPS";      default: return "NONE"; }
+}
 volatile int  g_fixQ = FIX_NONE;
 unsigned long g_lastGga = 0;
 char nmea[100];
@@ -291,6 +299,97 @@ void provisionMosaic() {
 #endif
 }
 
+// ---------- runtime web UI (STA) — configure + monitor without an LCD ----------
+// Reachable at http://ntrip-rover.local/ (or the device IP) once on WiFi.
+// WiFi creds stay with WiFiManager (the boot portal); this only edits NTRIP +
+// shows live status. Config changes apply hot (NTRIP restarts, no reboot).
+static const char PAGE[] PROGMEM = R"HTML(
+<!doctype html><meta name=viewport content="width=device-width,initial-scale=1">
+<title>NTRIP rover</title>
+<style>body{font-family:system-ui,sans-serif;margin:1.2rem;max-width:30rem}
+h1{font-size:1.2rem}label{display:block;margin:.5rem 0 .1rem}
+input{width:100%;padding:.4rem;box-sizing:border-box}
+button{margin-top:.8rem;padding:.5rem 1rem}
+#s{background:#f4f4f4;padding:.6rem;border-radius:.4rem;margin:.6rem 0;font-family:monospace;white-space:pre-wrap}
+.r{color:#b00}.g{color:#080}</style>
+<h1>NTRIP rover (G5-P3H)</h1>
+<div id=s>loading…</div>
+<form method=POST action=/save>
+<label>NTRIP host<input name=host></label>
+<label>Port<input name=port></label>
+<label>Mountpoint<input name=mount></label>
+<label>User (optional)<input name=user></label>
+<label>Pass (optional)<input name=pass></label>
+<button>Save &amp; apply</button></form>
+<form method=POST action=/reboot style=display:inline><button>Reboot</button></form>
+<form method=POST action=/wifireset style=display:inline><button>Forget WiFi</button></form>
+<script>
+async function u(){let r=await fetch('/status.json');let d=await r.json();
+document.getElementById('s').innerHTML=
+'WiFi  '+d.wifi.ssid+'  '+d.wifi.ip+'  '+d.wifi.rssi+'dBm\n'+
+'NTRIP '+(d.ntrip.connected?'<span class=g>connected</span>':'<span class=r>down</span>')+
+'  '+d.ntrip.host+':'+d.ntrip.port+'/'+d.ntrip.mount+'\n'+
+'RTCM  '+d.ntrip.bytes+' B'+(d.ntrip.stalled?'  <span class=r>STALLED</span>':'')+'\n'+
+'Fix   '+(d.fix.q=='RTK-FIX'?'<span class=g>':'')+d.fix.q+(d.fix.q=='RTK-FIX'?'</span>':'')+
+  (d.fix.fresh?'':'  (stale)')+'\nUp    '+d.up+' s';
+for(let k of ['host','port','mount','user','pass'])
+  {let e=document.querySelector('[name='+k+']');if(e&&!e.dataset.t)e.value=d.cfg[k];}}
+u();setInterval(u,2000);
+document.querySelectorAll('input').forEach(e=>e.addEventListener('input',()=>e.dataset.t=1));
+</script>)HTML";
+
+void handleRoot()   { server.send_P(200, "text/html", PAGE); }
+
+void handleStatus() {
+  unsigned long now = millis();
+  bool ggaFresh = (now - g_lastGga) < GGA_STALE_MS;
+  bool stalled  = ntrip_c.connected() && (now - lastRtcm > RTCM_STALL_MS);
+  char buf[512];
+  snprintf(buf, sizeof(buf),
+    "{\"wifi\":{\"ssid\":\"%s\",\"ip\":\"%s\",\"rssi\":%d},"
+    "\"ntrip\":{\"host\":\"%s\",\"port\":%d,\"mount\":\"%s\",\"connected\":%s,"
+    "\"bytes\":%llu,\"stalled\":%s},"
+    "\"fix\":{\"q\":\"%s\",\"fresh\":%s},"
+    "\"cfg\":{\"host\":\"%s\",\"port\":%d,\"mount\":\"%s\",\"user\":\"%s\",\"pass\":\"%s\"},"
+    "\"up\":%lu}",
+    WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(), WiFi.RSSI(),
+    cfg.host, cfg.port, cfg.mount, ntrip_c.connected() ? "true" : "false",
+    (unsigned long long)totalBytes, stalled ? "true" : "false",
+    fixStr(g_fixQ), ggaFresh ? "true" : "false",
+    cfg.host, cfg.port, cfg.mount, cfg.user, cfg.pass, now / 1000);
+  server.send(200, "application/json", buf);
+}
+
+void handleSave() {
+  if (server.hasArg("host"))  strlcpy(cfg.host,  server.arg("host").c_str(),  sizeof(cfg.host));
+  if (server.hasArg("port"))  { int p = server.arg("port").toInt(); if (p > 0) cfg.port = p; }
+  if (server.hasArg("mount")) strlcpy(cfg.mount, server.arg("mount").c_str(), sizeof(cfg.mount));
+  if (server.hasArg("user"))  strlcpy(cfg.user,  server.arg("user").c_str(),  sizeof(cfg.user));
+  if (server.hasArg("pass"))  strlcpy(cfg.pass,  server.arg("pass").c_str(),  sizeof(cfg.pass));
+  saveConfig();
+  Serial.printf("web: saved NTRIP %s:%d/%s — applying\n", cfg.host, cfg.port, cfg.mount);
+  server.sendHeader("Location", "/");
+  server.send(303, "text/plain", "saved");
+  ntrip_c.stop();          // loop reconnects with the new config (hot apply)
+}
+
+void handleReboot()   { server.send(200, "text/plain", "rebooting"); delay(200); ESP.restart(); }
+void handleWifiReset() {
+  server.send(200, "text/plain", "forgetting WiFi, rebooting to portal");
+  delay(200); WiFi.disconnect(true, true); delay(200); ESP.restart();
+}
+
+void startWebServer() {
+  if (MDNS.begin(MDNS_NAME)) { MDNS.addService("http", "tcp", 80);
+    Serial.printf("web UI: http://%s.local/  (or http://%s/)\n", MDNS_NAME, WiFi.localIP().toString().c_str()); }
+  server.on("/", HTTP_GET, handleRoot);
+  server.on("/status.json", HTTP_GET, handleStatus);
+  server.on("/save", HTTP_POST, handleSave);
+  server.on("/reboot", HTTP_POST, handleReboot);
+  server.on("/wifireset", HTTP_POST, handleWifiReset);
+  server.begin();
+}
+
 void setup() {
   auto c = M5.config();
   M5.begin(c);
@@ -303,6 +402,7 @@ void setup() {
   setLed(0x40, 0, 0);        // red = starting
   provisionMosaic();         // self-configure the receiver (out-of-the-box)
   setupWiFi();               // blocks until WiFi up (or portal)
+  startWebServer();          // http://ntrip-rover.local/ — config + status (no LCD)
   lastRtcm = millis();
 }
 
@@ -320,6 +420,7 @@ void loop() {
     return;
   }
   wifiDownSince = 0;
+  server.handleClient();     // web UI (works whether or not NTRIP is up)
 
   // --- NTRIP: reconnect in place with backoff ---
   bool ntripUp = ntrip_c.connected();
@@ -343,10 +444,8 @@ void loop() {
   // --- 1 Hz status line ---
   static unsigned long lastPrint = 0;
   if (now - lastPrint >= 1000) {
-    const char* q = (g_fixQ==FIX_RTK_FIXED?"RTK-FIX":g_fixQ==FIX_RTK_FLOAT?"RTK-FLT":
-                     g_fixQ==FIX_DGPS?"DGPS":g_fixQ==FIX_GPS?"GPS":"NONE");
     bool ggaFresh = (now - g_lastGga) < GGA_STALE_MS;
-    Serial.printf("RTCM %llu B | fix=%s%s\n", totalBytes, q, ggaFresh ? "" : " (stale)");
+    Serial.printf("RTCM %llu B | fix=%s%s\n", totalBytes, fixStr(g_fixQ), ggaFresh ? "" : " (stale)");
     lastPrint = now;
   }
 

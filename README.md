@@ -68,10 +68,18 @@ pio run -t upload       # flash (upload_speed=115200)
 pio device monitor      # 115200
 ```
 
-**設定ポータル**：起動時に**本体ボタンを長押し**すると SSID `NTRIP-Client` のポータルが開き、
-WiFi に加えて **NTRIP のホスト/ポート/マウント/ユーザ/パス**も設定できる（NVS 保存＝別現場・
-別基準局へ焼き直し無しで移動可）。押さなければ保存済み設定で自動接続。既定は
-`rtk.toiso.fit:2101/eniwa-bd982`（anonymous）。
+**WiFi 設定ポータル**：起動時に**本体ボタンを長押し**すると SSID `NTRIP-Client` の AP
+ポータルが開き、WiFi creds＋NTRIP 設定を投入できる（web に到達する前段なので WiFi は
+ここで）。押さなければ保存済みで自動接続。
+
+**Web UI（液晶が無いのでこれが主 UI）**：STA 接続後、**http://ntrip-rover.local/**
+（または表示された IP）で稼働中に**設定変更＋監視**ができる。実機確認済み：
+- ライブ status（WiFi/RSSI、NTRIP 接続、RTCM バイト数、**fix 品質**、稼働時間）を 2 秒毎更新
+- NTRIP ホスト/ポート/マウント/ユーザ/パスを変更→**Save & apply**（NVS 保存＋NTRIP を
+  ホット再接続、再起動不要）。別現場・別基準局へ焼き直し無しで移動可
+- Reboot / Forget WiFi（ポータルへ）ボタン
+- 既定は `rtk.toiso.fit:2101/eniwa-bd982`（anonymous）
+- 認証なし（個人 LAN 前提）。必要なら Basic auth 追加は容易
 
 **再接続**：WiFi/NTRIP 断は**その場でリトライ**（再起動しない）。最後の砦として WiFi が
 3分以上復帰しない時だけ再起動。
