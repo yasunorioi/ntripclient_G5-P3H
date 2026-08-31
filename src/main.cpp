@@ -21,10 +21,11 @@
  *    Atom G26 (TX) ──► mosaic COM1 RX      Atom G32 (RX) ◄── mosaic COM1 TX      GND──GND
  *  If no fix / no GGA, suspect G26/G32 swapped.
  *
- *  mosaic-go one-time config (save to boot config — it only applies output config in
- *  the quiet window before streaming):
- *    - COM1 @115200: accept RTCM3 corrections (input) AND output NMEA GGA (for the LED).
- *    - COM2 @38400 : output NMEA GGA to the tractor.
+ *  mosaic-go setup: NONE by hand. The Atom self-provisions the receiver on boot
+ *  (setNMEAOutput on COM1 for the LED + COM2 @38400 for the tractor), re-applied
+ *  every power-up (current config, like tab5-caster) — a factory receiver works
+ *  out of the box. Assumes COM1 is at its 115200 default. RTCM3 fed to COM1 is
+ *  auto-used as corrections. Set PROVISION_MOSAIC 0 to disable.
  *
  *  LED: blue=portal, yellow=WiFi connecting, magenta=NTRIP connecting,
  *       GREEN=RTK fixed, CYAN=RTK float, ORANGE=corrections flowing but not fixed,
@@ -48,7 +49,12 @@ CRGB leds[NUM_LEDS];
 // ---- mosaic COM1 link on the Atom's Grove UART (3.3V TTL) ----
 #define MOSAIC_TX_PIN 26          // Atom G26 = Serial2 TX -> mosaic COM1 RX
 #define MOSAIC_RX_PIN 32          // Atom G32 = Serial2 RX <- mosaic COM1 TX (GGA back)
-#define MOSAIC_COM1_BAUD 115200   // match the receiver's COM1 baud
+#define MOSAIC_COM1_BAUD 115200   // mosaic COM1 default; the command channel too
+
+// Self-provision the mosaic on boot so a factory receiver works out of the box
+// (no manual RxTools/web-UI step). Set 0 if you pre-configured + saved boot config.
+#define PROVISION_MOSAIC 1
+#define TRACTOR_NMEA_BAUD 38400   // mosaic COM2 -> tractor guidance
 
 // ---- Runtime config (NVS-backed, editable in the portal) ----
 struct Config {
@@ -225,6 +231,56 @@ bool ntripConnect() {
   return ok;
 }
 
+// ---------- mosaic self-provisioning (Septentrio command channel on COM1) ----------
+// Send one ASCII command (CR-terminated) and scan the reply for the ack. The
+// receiver prefixes a good reply with "$R:" and a rejected one with "$R?".
+bool sendMosaicCmd(const char* cmd, uint32_t timeout_ms) {
+  while (Serial2.available()) Serial2.read();     // flush stale bytes
+  Serial2.print(cmd); Serial2.print("\r\n");
+  char buf[256]; size_t n = 0; unsigned long t0 = millis();
+  while (millis() - t0 < timeout_ms) {
+    while (Serial2.available()) { char ch = Serial2.read(); if (n < sizeof(buf) - 1) buf[n++] = ch; }
+    buf[n] = 0;
+    if (strstr(buf, "$R:")) return true;          // acked
+    if (strstr(buf, "$R?")) return false;         // rejected
+    delay(5);
+  }
+  return false;                                   // silent (timeout)
+}
+
+// Retry a command until it acks or the shared deadline passes. Best-effort: a
+// no-ack is logged and we press on — the RTCM3 forwarder still runs.
+bool provisionOne(const char* cmd, unsigned long deadline) {
+  while (millis() < deadline) {
+    if (sendMosaicCmd(cmd, 800)) { Serial.printf("  OK  %s\n", cmd); return true; }
+    delay(300);
+  }
+  Serial.printf("  no-ack %s (continuing)\n", cmd);
+  return false;
+}
+
+void provisionMosaic() {
+#if PROVISION_MOSAIC
+  setLed(0x30, 0x10, 0);                          // amber = provisioning
+  unsigned long deadline = millis() + 25000;      // the receiver may still be cold-booting
+  Serial.println("Provisioning mosaic (COM1)...");
+  bool alive = false;
+  while (millis() < deadline) { if (sendMosaicCmd("getReceiverCapabilities", 800)) { alive = true; break; } delay(400); }
+  if (!alive) { Serial.println("mosaic silent — skipping (check wiring/baud; forwarder still runs)"); return; }
+
+  char cmd[80];
+  // COM2 -> tractor: set baud, then output NMEA GGA at 1 Hz.
+  snprintf(cmd, sizeof(cmd), "setCOMSettings, COM2, baud%d", TRACTOR_NMEA_BAUD);
+  provisionOne(cmd, deadline);
+  provisionOne("setNMEAOutput, Stream1, COM2, GGA, sec1", deadline);
+  // COM1 -> Atom: NMEA GGA for the fix-status LED. Last, since it starts GGA on
+  // our command channel. RTCM3 corrections we feed to COM1 are auto-used by
+  // default (no explicit input command needed — verified on this P3H over USB).
+  provisionOne("setNMEAOutput, Stream2, COM1, GGA, sec1", deadline);
+  Serial.println("mosaic provisioning done");
+#endif
+}
+
 void setup() {
   auto c = M5.config();
   M5.begin(c);
@@ -235,6 +291,7 @@ void setup() {
 
   loadConfig();
   setLed(0x40, 0, 0);        // red = starting
+  provisionMosaic();         // self-configure the receiver (out-of-the-box)
   setupWiFi();               // blocks until WiFi up (or portal)
   lastRtcm = millis();
 }

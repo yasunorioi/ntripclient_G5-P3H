@@ -37,18 +37,23 @@ Atom の Grove(HY2.0) → mosaic COM1。**両側とも 3.3V LVTTL なので、�
 **COM2 → トラクタ**は別レグ。mosaic COM2 も LVTTL、トラクタ入力が RS232 なら
 その脚だけ RS232 トランシーバ(在庫品)を噛ませる。**Atom はこのレグに関与しない。**
 
-## mosaic-go 側の一度きり設定（重要）
+## mosaic-go 側の設定：不要（Atom が自己プロビジョニング）
 
-mosaic は「**SBF/出力ストリーム開始前の静かな窓**」でしか出力設定を適用しないため、
-受信機側で**一度設定して boot config に保存**しておくのが堅い（Atom を毎起動で
-provisioning させる必要がなくなり、フォワーダを単純に保てる）。web UI / RxTools で：
+**手動設定は要らない。** Atom が起動時に COM1 の Septentrio コマンドチャネルへ
+コマンドを送り、受信機を構成する（tab5-caster と同じ思想＝current-config・**毎起動
+再適用**なので、工場出荷状態の受信機がそのまま一発で動く）。送るのは：
 
-- **COM1** @115200: RTCM3 補正を差分ソースとして受理（`setRTCMInput` / 既定 auto）**かつ
-  NMEA GGA を出力**（例 `setNMEAOutput, Stream2, COM1, GGA, sec1`）。GGA を COM1 に返すのは
-  Atom が **fix 状態を読んで LED に反映**するため（下記 LED 参照）。COM1 baud は
-  `MOSAIC_COM1_BAUD`(既定 115200) に合わせる。
-- **COM2** @38400: **NMEA GGA** を出力（例 `setNMEAOutput, Stream1, COM2, GGA, sec1`）→ トラクタへ。
-- 設定後 **boot config に保存**（`exeCopyConfigFile, Current, Boot`）。
+- `setCOMSettings, COM2, baud38400` → `setNMEAOutput, Stream1, COM2, GGA, sec1`（トラクタへ 38400 GGA）
+- `setNMEAOutput, Stream2, COM1, GGA, sec1`（Atom の fix-LED 用に COM1 へ GGA を返す）
+
+各コマンドは `$R:` ack までリトライ（受信機のコールドブート待ちに ~25s の猶予）。
+mosaic が沈黙していても（結線/baud 違い）フォワーダ自体は動く（ベストエフォート）。
+
+前提と注意：
+- **COM1 は既定 115200** で話す（`MOSAIC_COM1_BAUD`）。受信機側で COM1 baud を変えていたら戻す。
+- **RTCM3 入力は Septentrio 既定の auto 使用**に依存（明示コマンド無しで補正が効く。
+  tab5-client でも USB 経由・明示設定無しで RTK fixed 実績）。
+- 事前に自分で設定して boot config 保存する運用にしたい場合は `PROVISION_MOSAIC 0`。
 
 > この G5 P3H は rover 専用個体（permission に RTKBase 無し・RTCM3 は入力のみ）。
 > 基準局には使えない＝補正は外部の BD982(`eniwa-bd982`)から取る、で正しい。
