@@ -37,23 +37,30 @@ Atom の Grove(HY2.0) → mosaic COM1。**両側とも 3.3V LVTTL なので、�
 **COM2 → トラクタ**は別レグ。mosaic COM2 も LVTTL、トラクタ入力が RS232 なら
 その脚だけ RS232 トランシーバ(在庫品)を噛ませる。**Atom はこのレグに関与しない。**
 
-## mosaic-go 側の設定：不要（Atom が自己プロビジョニング）
+## mosaic-go 側の設定（プロビジョニングの実際）
 
-**手動設定は要らない。** Atom が起動時に COM1 の Septentrio コマンドチャネルへ
-コマンドを送り、受信機を構成する（tab5-caster と同じ思想＝current-config・**毎起動
-再適用**なので、工場出荷状態の受信機がそのまま一発で動く）。送るのは：
+起動時、Atom は受信機の状態を見て2通りに振る舞う（**非ブロッキング**・転送は解決まで保留）：
 
-- `setCOMSettings, COM2, baud38400` → `setNMEAOutput, Stream1, COM2, GGA, sec1`（トラクタへ 38400 GGA）
-- `setNMEAOutput, Stream2, COM1, GGA, sec1`（Atom の fix-LED 用に COM1 へ GGA を返す）
+1. **すでに GGA が来ている＝設定済み** → 何もせず即転送開始（保存済み boot config で動作）。
+   → **実機の P3H はこれ**。数秒で RTK-FIX。
+2. **GGA が来ない＝未設定（工場出荷など）** → COM1 の Septentrio コマンドで自己構成：
+   - `setCOMSettings, COM2, baud<com2_baud>` → `setNMEAOutput, Stream1, COM2, <com2_nmea>, sec1`（トラクタ）
+   - `setNMEAOutput, Stream2, COM1, GGA, sec1`（Atom の fix-LED 用）
+   `$R:` ack までリトライ、~30s で諦めて転送（ベストエフォート）。
 
-各コマンドは `$R:` ack までリトライ（受信機のコールドブート待ちに ~25s の猶予）。
-mosaic が沈黙していても（結線/baud 違い）フォワーダ自体は動く（ベストエフォート）。
+> ⚠ **重要な実機知見**：この P3H の **COM1 は ASCII コマンドに応答しない**（`$R:` も
+> `$R?` も返らない＝input が RTCMv3 専用でコマンド解釈しない）。RTCM3 入力・GGA 出力は
+> 保存設定で完動するが、**Atom からコマンドで COM2 等を再構成することはできない**。
+> コマンド駆動の自己構成／後述の COM2 変更を効かせたい場合は、受信機の
+> **COM1 input を `auto` に**しておく（RxTools/USB で一度）か、コマンドを受ける個体を使う。
 
-前提と注意：
-- **COM1 は既定 115200** で話す（`MOSAIC_COM1_BAUD`）。受信機側で COM1 baud を変えていたら戻す。
-- **RTCM3 入力は Septentrio 既定の auto 使用**に依存（明示コマンド無しで補正が効く。
-  tab5-client でも USB 経由・明示設定無しで RTK fixed 実績）。
-- 事前に自分で設定して boot config 保存する運用にしたい場合は `PROVISION_MOSAIC 0`。
+前提：**COM1 は既定 115200**（`MOSAIC_COM1_BAUD`）。RTCM3 入力は Septentrio 既定の
+auto 使用に依存（明示コマンド無しで補正が効く）。`PROVISION_MOSAIC 0` で自己構成を無効化。
+
+### COM2（トラクタ出力）の baud / NMEA を選ぶ
+Web UI で **COM2 baud** と **COM2 NMEA**（例 `GGA` / `GGA+VTG`）を設定できる（NVS 保存）。
+これは上記②の自己構成コマンドに反映される。**コマンドを受け付ける受信機でのみ**受信機に
+反映（この P3H のようにコマンド非対応の個体では、値は保存されるが受信機側は RxTools で設定）。
 
 > この G5 P3H は rover 専用個体（permission に RTKBase 無し・RTCM3 は入力のみ）。
 > 基準局には使えない＝補正は外部の BD982(`eniwa-bd982`)から取る、で正しい。
