@@ -73,7 +73,17 @@ static const char* DEF_USER  = "";      // anonymous
 static const char* DEF_PASS  = "";
 
 void loadConfig() {
-  prefs.begin("ntrip", true);           // read-only
+  // Open read-write and seed the defaults on a fresh device, so the keys exist.
+  // Otherwise the Arduino Preferences layer logs an [E] for every missing key
+  // (it still returns the default, but the noise looks like a fault on boot).
+  prefs.begin("ntrip", false);
+  if (!prefs.isKey("host")) {
+    prefs.putString("host", DEF_HOST);
+    prefs.putInt("port", DEF_PORT);
+    prefs.putString("mount", DEF_MOUNT);
+    prefs.putString("user", DEF_USER);
+    prefs.putString("pass", DEF_PASS);
+  }
   String h = prefs.getString("host", DEF_HOST);
   cfg.port = prefs.getInt("port", DEF_PORT);
   String m = prefs.getString("mount", DEF_MOUNT);
