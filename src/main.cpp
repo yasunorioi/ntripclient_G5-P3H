@@ -55,10 +55,9 @@ CRGB leds[NUM_LEDS];
 #define MOSAIC_RX_PIN 32          // Atom G32 = Serial2 RX <- mosaic COM1 TX (GGA back)
 #define MOSAIC_COM1_BAUD 115200   // mosaic COM1 default; the command channel too
 
-// Self-provision the mosaic on boot so a factory receiver works out of the box
-// (no manual RxTools/web-UI step). Set 0 if you pre-configured + saved boot config.
+// Self-provision the mosaic so a factory receiver works out of the box (no
+// manual RxTools/web-UI step). Set 0 if you pre-configured + saved boot config.
 #define PROVISION_MOSAIC 1
-#define TRACTOR_NMEA_BAUD 38400   // mosaic COM2 -> tractor guidance
 
 // ---- Runtime config (NVS-backed, editable in the portal) ----
 struct Config {
@@ -67,37 +66,46 @@ struct Config {
   char mount[48];
   char user[32];
   char pass[32];
+  int  com2_baud;       // mosaic COM2 -> tractor: baud
+  char com2_nmea[32];   // mosaic COM2 -> tractor: NMEA sentences, e.g. "GGA" / "GGA+VTG"
 } cfg;
 
-// Factory defaults (used until the portal overwrites them).
+// Factory defaults (used until the portal/web overwrites them).
 static const char* DEF_HOST  = "rtk.toiso.fit";
 static const int   DEF_PORT  = 2101;
 static const char* DEF_MOUNT = "eniwa-bd982";
 static const char* DEF_USER  = "";      // anonymous
 static const char* DEF_PASS  = "";
+static const int   DEF_COM2_BAUD = 38400;
+static const char* DEF_COM2_NMEA = "GGA";
 
 void loadConfig() {
   // Open read-write and seed the defaults on a fresh device, so the keys exist.
   // Otherwise the Arduino Preferences layer logs an [E] for every missing key
   // (it still returns the default, but the noise looks like a fault on boot).
   prefs.begin("ntrip", false);
-  if (!prefs.isKey("host")) {
-    prefs.putString("host", DEF_HOST);
-    prefs.putInt("port", DEF_PORT);
-    prefs.putString("mount", DEF_MOUNT);
-    prefs.putString("user", DEF_USER);
-    prefs.putString("pass", DEF_PASS);
-  }
+  // Seed any missing key individually (so keys added in later firmware versions
+  // get created on an already-provisioned device too — avoids [E] NOT_FOUND logs).
+  if (!prefs.isKey("host"))   prefs.putString("host", DEF_HOST);
+  if (!prefs.isKey("port"))   prefs.putInt("port", DEF_PORT);
+  if (!prefs.isKey("mount"))  prefs.putString("mount", DEF_MOUNT);
+  if (!prefs.isKey("user"))   prefs.putString("user", DEF_USER);
+  if (!prefs.isKey("pass"))   prefs.putString("pass", DEF_PASS);
+  if (!prefs.isKey("c2baud")) prefs.putInt("c2baud", DEF_COM2_BAUD);
+  if (!prefs.isKey("c2nmea")) prefs.putString("c2nmea", DEF_COM2_NMEA);
   String h = prefs.getString("host", DEF_HOST);
   cfg.port = prefs.getInt("port", DEF_PORT);
   String m = prefs.getString("mount", DEF_MOUNT);
   String u = prefs.getString("user", DEF_USER);
   String p = prefs.getString("pass", DEF_PASS);
+  cfg.com2_baud = prefs.getInt("c2baud", DEF_COM2_BAUD);
+  String n = prefs.getString("c2nmea", DEF_COM2_NMEA);
   prefs.end();
   strlcpy(cfg.host, h.c_str(), sizeof(cfg.host));
   strlcpy(cfg.mount, m.c_str(), sizeof(cfg.mount));
   strlcpy(cfg.user, u.c_str(), sizeof(cfg.user));
   strlcpy(cfg.pass, p.c_str(), sizeof(cfg.pass));
+  strlcpy(cfg.com2_nmea, n.c_str(), sizeof(cfg.com2_nmea));
 }
 
 void saveConfig() {
@@ -107,6 +115,8 @@ void saveConfig() {
   prefs.putString("mount", cfg.mount);
   prefs.putString("user", cfg.user);
   prefs.putString("pass", cfg.pass);
+  prefs.putInt("c2baud", cfg.com2_baud);
+  prefs.putString("c2nmea", cfg.com2_nmea);
   prefs.end();
 }
 
@@ -252,50 +262,100 @@ bool ntripConnect() {
 // ---------- mosaic self-provisioning (Septentrio command channel on COM1) ----------
 // Send one ASCII command (CR-terminated) and scan the reply for the ack. The
 // receiver prefixes a good reply with "$R:" and a rejected one with "$R?".
+char g_dbgReply[160];   // last raw reply (printable), for provisioning diagnosis
+static void snapReply(const char* buf, size_t n) {
+  size_t j = 0;
+  for (size_t i = 0; i < n && j < sizeof(g_dbgReply) - 1; i++) {
+    char c = buf[i];
+    g_dbgReply[j++] = (c >= 32 && c < 127) ? c : (c == '\r' || c == '\n') ? '/' : '.';
+  }
+  g_dbgReply[j] = 0;
+}
+
 bool sendMosaicCmd(const char* cmd, uint32_t timeout_ms) {
   while (Serial2.available()) Serial2.read();     // flush stale bytes
   Serial2.print(cmd); Serial2.print("\r\n");
   char buf[256]; size_t n = 0; unsigned long t0 = millis();
+  bool ret = false;
   while (millis() - t0 < timeout_ms) {
     while (Serial2.available()) { char ch = Serial2.read(); if (n < sizeof(buf) - 1) buf[n++] = ch; }
     buf[n] = 0;
-    if (strstr(buf, "$R:")) return true;          // acked
-    if (strstr(buf, "$R?")) return false;         // rejected
+    if (strstr(buf, "$R:")) { ret = true;  break; }   // acked
+    if (strstr(buf, "$R?")) { ret = false; break; }   // rejected
     delay(5);
   }
-  return false;                                   // silent (timeout)
+  snapReply(buf, n);                                  // stash for diagnosis
+  return ret;
 }
 
-// Retry a command until it acks or the shared deadline passes. Best-effort: a
-// no-ack is logged and we press on — the RTCM3 forwarder still runs.
+// Non-blocking provisioning state machine. The tricky part (learned on hardware):
+//  - Provision TOO EARLY (0-25 s) and the receiver is still cold-booting -> no ack.
+//  - Provision TOO LATE, after RTK is streaming, and setNMEAOutput is IGNORED
+//    (the mosaic only applies output config in the "quiet window" before it streams).
+// So we HOLD RTCM3 forwarding until provisioning resolves (keeping the receiver out
+// of RTK = quiet window open), and keep polling for it to come alive in the loop.
+// WiFi/web/NTRIP still come up immediately; only the byte-forward waits.
+enum ProvState { PROV_WAIT, PROV_DONE, PROV_GAVEUP };
+ProvState     g_prov = PROV_WAIT;
+unsigned long g_provDeadline = 0;   // set in setup()
+unsigned long g_lastProvTry  = 0;
+bool          g_forceProv    = false;   // web COM2 change: push commands even if GGA present
+
+// Retry one command until it acks or a short deadline passes (only runs once the
+// receiver is confirmed alive, so this blocks for at most a couple of seconds).
 bool provisionOne(const char* cmd, unsigned long deadline) {
   while (millis() < deadline) {
     if (sendMosaicCmd(cmd, 800)) { Serial.printf("  OK  %s\n", cmd); return true; }
-    delay(300);
+    delay(200);
   }
   Serial.printf("  no-ack %s (continuing)\n", cmd);
   return false;
 }
 
-void provisionMosaic() {
-#if PROVISION_MOSAIC
-  setLed(0x30, 0x10, 0);                          // amber = provisioning
-  unsigned long deadline = millis() + 25000;      // the receiver may still be cold-booting
-  Serial.println("Provisioning mosaic (COM1)...");
-  bool alive = false;
-  while (millis() < deadline) { if (sendMosaicCmd("getReceiverCapabilities", 800)) { alive = true; break; } delay(400); }
-  if (!alive) { Serial.println("mosaic silent — skipping (check wiring/baud; forwarder still runs)"); return; }
+// Apply the receiver config from cfg (COM2 -> tractor, COM1 GGA -> our LED).
+void applyProvision() {
+  char cmd[96];
+  snprintf(cmd, sizeof(cmd), "setCOMSettings, COM2, baud%d", cfg.com2_baud);
+  provisionOne(cmd, millis() + 6000);
+  snprintf(cmd, sizeof(cmd), "setNMEAOutput, Stream1, COM2, %s, sec1", cfg.com2_nmea);
+  provisionOne(cmd, millis() + 6000);
+  // COM1 GGA for the fix-status LED. Last, since it starts GGA on our command
+  // channel. RTCM3 fed to COM1 is auto-used as corrections (no explicit command).
+  provisionOne("setNMEAOutput, Stream2, COM1, GGA, sec1", millis() + 6000);
+}
 
-  char cmd[80];
-  // COM2 -> tractor: set baud, then output NMEA GGA at 1 Hz.
-  snprintf(cmd, sizeof(cmd), "setCOMSettings, COM2, baud%d", TRACTOR_NMEA_BAUD);
-  provisionOne(cmd, deadline);
-  provisionOne("setNMEAOutput, Stream1, COM2, GGA, sec1", deadline);
-  // COM1 -> Atom: NMEA GGA for the fix-status LED. Last, since it starts GGA on
-  // our command channel. RTCM3 corrections we feed to COM1 are auto-used by
-  // default (no explicit input command needed — verified on this P3H over USB).
-  provisionOne("setNMEAOutput, Stream2, COM1, GGA, sec1", deadline);
-  Serial.println("mosaic provisioning done");
+// Called every loop while PROV_WAIT. Polls the receiver; on the first ack it
+// applies the config and transitions to PROV_DONE. Times out to PROV_GAVEUP.
+void provisionTick(unsigned long now) {
+#if PROVISION_MOSAIC
+  if (g_prov != PROV_WAIT) return;
+
+  // Shortcut: if the receiver is already streaming NMEA (GGA fresh) it's already
+  // configured (saved boot config) — no provisioning needed, start forwarding.
+  // This is also the ONLY path for a receiver whose COM1 input is set to
+  // RTCMv3-only and therefore silently ignores ASCII commands (observed on the
+  // user's P3H): commands can't reconfigure it, but its saved config already works.
+  if (!g_forceProv && (now - g_lastGga) < GGA_STALE_MS) {
+    g_prov = PROV_DONE;
+    Serial.println("provision: GGA present — receiver already configured, forwarding");
+    return;
+  }
+
+  if (now > g_provDeadline) {
+    g_prov = PROV_GAVEUP; g_forceProv = false;
+    Serial.printf("provision: gave up (COM1 not answering commands; last=[%s]) — forwarding\n", g_dbgReply);
+    return;
+  }
+  if (now - g_lastProvTry < 1500) return;         // poll ~every 1.5 s
+  g_lastProvTry = now;
+  // Try the command interface (a factory receiver's COM1 accepts commands; we're
+  // in the quiet window since forwarding is held while PROV_WAIT).
+  if (!sendMosaicCmd("getReceiverCapabilities", 600)) return;
+  Serial.println("provision: command interface alive — applying config");
+  applyProvision();
+  g_prov = PROV_DONE; g_forceProv = false;
+#else
+  g_prov = PROV_GAVEUP;
 #endif
 }
 
@@ -320,6 +380,8 @@ button{margin-top:.8rem;padding:.5rem 1rem}
 <label>Mountpoint<input name=mount></label>
 <label>User (optional)<input name=user></label>
 <label>Pass (optional)<input name=pass></label>
+<label>COM2 baud (to tractor)<input name=com2_baud></label>
+<label>COM2 NMEA (e.g. GGA or GGA+VTG)<input name=com2_nmea></label>
 <button>Save &amp; apply</button></form>
 <form method=POST action=/reboot style=display:inline><button>Reboot</button></form>
 <form method=POST action=/wifireset style=display:inline><button>Forget WiFi</button></form>
@@ -331,8 +393,10 @@ document.getElementById('s').innerHTML=
 '  '+d.ntrip.host+':'+d.ntrip.port+'/'+d.ntrip.mount+'\n'+
 'RTCM  '+d.ntrip.bytes+' B'+(d.ntrip.stalled?'  <span class=r>STALLED</span>':'')+'\n'+
 'Fix   '+(d.fix.q=='RTK-FIX'?'<span class=g>':'')+d.fix.q+(d.fix.q=='RTK-FIX'?'</span>':'')+
-  (d.fix.fresh?'':'  (stale)')+'\nUp    '+d.up+' s';
-for(let k of ['host','port','mount','user','pass'])
+  (d.fix.fresh?'':'  (stale)')+'\n'+
+'Prov  '+(d.prov=='done'?'<span class=g>done</span>':d.prov=='wait'?'<span class=r>waiting…</span>':'gave up')+
+'\nUp    '+d.up+' s';
+for(let k of ['host','port','mount','user','pass','com2_baud','com2_nmea'])
   {let e=document.querySelector('[name='+k+']');if(e&&!e.dataset.t)e.value=d.cfg[k];}}
 u();setInterval(u,2000);
 document.querySelectorAll('input').forEach(e=>e.addEventListener('input',()=>e.dataset.t=1));
@@ -344,33 +408,49 @@ void handleStatus() {
   unsigned long now = millis();
   bool ggaFresh = (now - g_lastGga) < GGA_STALE_MS;
   bool stalled  = ntrip_c.connected() && (now - lastRtcm > RTCM_STALL_MS);
-  char buf[512];
+  char buf[640];
   snprintf(buf, sizeof(buf),
     "{\"wifi\":{\"ssid\":\"%s\",\"ip\":\"%s\",\"rssi\":%d},"
     "\"ntrip\":{\"host\":\"%s\",\"port\":%d,\"mount\":\"%s\",\"connected\":%s,"
     "\"bytes\":%llu,\"stalled\":%s},"
     "\"fix\":{\"q\":\"%s\",\"fresh\":%s},"
-    "\"cfg\":{\"host\":\"%s\",\"port\":%d,\"mount\":\"%s\",\"user\":\"%s\",\"pass\":\"%s\"},"
-    "\"up\":%lu}",
+    "\"cfg\":{\"host\":\"%s\",\"port\":%d,\"mount\":\"%s\",\"user\":\"%s\",\"pass\":\"%s\","
+    "\"com2_baud\":%d,\"com2_nmea\":\"%s\"},"
+    "\"prov\":\"%s\",\"up\":%lu}",
     WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(), WiFi.RSSI(),
     cfg.host, cfg.port, cfg.mount, ntrip_c.connected() ? "true" : "false",
     (unsigned long long)totalBytes, stalled ? "true" : "false",
     fixStr(g_fixQ), ggaFresh ? "true" : "false",
-    cfg.host, cfg.port, cfg.mount, cfg.user, cfg.pass, now / 1000);
+    cfg.host, cfg.port, cfg.mount, cfg.user, cfg.pass, cfg.com2_baud, cfg.com2_nmea,
+    g_prov==PROV_DONE?"done":g_prov==PROV_GAVEUP?"gaveup":"wait", now / 1000);
   server.send(200, "application/json", buf);
 }
 
 void handleSave() {
+  int  oldBaud = cfg.com2_baud;
+  char oldNmea[32]; strlcpy(oldNmea, cfg.com2_nmea, sizeof(oldNmea));
+
   if (server.hasArg("host"))  strlcpy(cfg.host,  server.arg("host").c_str(),  sizeof(cfg.host));
   if (server.hasArg("port"))  { int p = server.arg("port").toInt(); if (p > 0) cfg.port = p; }
   if (server.hasArg("mount")) strlcpy(cfg.mount, server.arg("mount").c_str(), sizeof(cfg.mount));
   if (server.hasArg("user"))  strlcpy(cfg.user,  server.arg("user").c_str(),  sizeof(cfg.user));
   if (server.hasArg("pass"))  strlcpy(cfg.pass,  server.arg("pass").c_str(),  sizeof(cfg.pass));
+  if (server.hasArg("com2_baud")) { int b = server.arg("com2_baud").toInt(); if (b > 0) cfg.com2_baud = b; }
+  if (server.hasArg("com2_nmea")) strlcpy(cfg.com2_nmea, server.arg("com2_nmea").c_str(), sizeof(cfg.com2_nmea));
   saveConfig();
-  Serial.printf("web: saved NTRIP %s:%d/%s — applying\n", cfg.host, cfg.port, cfg.mount);
+  Serial.printf("web: saved NTRIP %s:%d/%s  COM2 %d/%s — applying\n",
+                cfg.host, cfg.port, cfg.mount, cfg.com2_baud, cfg.com2_nmea);
   server.sendHeader("Location", "/");
   server.send(303, "text/plain", "saved");
-  ntrip_c.stop();          // loop reconnects with the new config (hot apply)
+
+  ntrip_c.stop();          // loop reconnects NTRIP with the new config (hot apply)
+  // COM2 change -> re-provision the receiver. Going back to PROV_WAIT pauses
+  // forwarding, so the mosaic drops RTK and the quiet window reopens; provisionTick
+  // then re-applies setCOMSettings/setNMEAOutput. Brief RTK blip during reconfig.
+  if (cfg.com2_baud != oldBaud || strcmp(cfg.com2_nmea, oldNmea) != 0) {
+    g_prov = PROV_WAIT; g_forceProv = true; g_provDeadline = millis() + 10000; g_lastProvTry = 0;
+    Serial.println("web: COM2 changed — re-provisioning (needs a command-capable receiver)");
+  }
 }
 
 void handleReboot()   { server.send(200, "text/plain", "rebooting"); delay(200); ESP.restart(); }
@@ -400,9 +480,9 @@ void setup() {
 
   loadConfig();
   setLed(0x40, 0, 0);        // red = starting
-  provisionMosaic();         // self-configure the receiver (out-of-the-box)
   setupWiFi();               // blocks until WiFi up (or portal)
   startWebServer();          // http://ntrip-rover.local/ — config + status (no LCD)
+  g_provDeadline = millis() + 30000;   // provisioning runs in loop() until this
   lastRtcm = millis();
 }
 
@@ -420,32 +500,43 @@ void loop() {
     return;
   }
   wifiDownSince = 0;
-  server.handleClient();     // web UI (works whether or not NTRIP is up)
+  server.handleClient();       // web UI (works whether or not NTRIP is up)
+  provisionTick(now);          // self-provision the receiver (non-blocking)
+  bool provResolved = (g_prov != PROV_WAIT);
 
   // --- NTRIP: reconnect in place with backoff ---
   bool ntripUp = ntrip_c.connected();
-  if (!ntripUp) {
-    if (now - lastNtripTry > NTRIP_RETRY_MS) { lastNtripTry = now; ntrip_c.stop(); ntripConnect(); }
-    updateLed(true, false, false);
-    delay(50);
-    return;
+  if (!ntripUp && (now - lastNtripTry > NTRIP_RETRY_MS)) {
+    lastNtripTry = now; ntrip_c.stop(); ntripConnect();
   }
 
-  // --- Forward RTCM3 to mosaic COM1 ---
-  while (ntrip_c.available()) { Serial2.write((uint8_t)ntrip_c.read()); totalBytes++; }
-  if (totalBytes > lastBytes) { lastBytes = totalBytes; lastRtcm = now; }
+  // --- RTCM3 -> mosaic COM1, but only once provisioning has resolved. Holding
+  //     it keeps the receiver out of RTK so setNMEAOutput lands in the quiet
+  //     window; meanwhile drain+discard so the NTRIP socket doesn't back up. ---
+  if (ntripUp) {
+    if (provResolved) {
+      while (ntrip_c.available()) { Serial2.write((uint8_t)ntrip_c.read()); totalBytes++; }
+      if (totalBytes > lastBytes) { lastBytes = totalBytes; lastRtcm = now; }
+    } else {
+      while (ntrip_c.available()) ntrip_c.read();   // discard while provisioning
+    }
+  }
 
   // --- Read GGA back from COM1 for the fix-status LED ---
   while (Serial2.available()) feedNmea((char)Serial2.read());
 
-  bool rtcmStalled = (now - lastRtcm > RTCM_STALL_MS);
-  updateLed(true, true, rtcmStalled);
+  // --- LED ---
+  if (!provResolved)   setLed(0x30, 0x10, 0);            // amber = provisioning
+  else if (!ntripUp)   updateLed(true, false, false);    // magenta = NTRIP connecting
+  else                 updateLed(true, true, (now - lastRtcm > RTCM_STALL_MS));
 
   // --- 1 Hz status line ---
   static unsigned long lastPrint = 0;
   if (now - lastPrint >= 1000) {
     bool ggaFresh = (now - g_lastGga) < GGA_STALE_MS;
-    Serial.printf("RTCM %llu B | fix=%s%s\n", totalBytes, fixStr(g_fixQ), ggaFresh ? "" : " (stale)");
+    Serial.printf("RTCM %llu B | fix=%s%s | prov=%s\n", totalBytes, fixStr(g_fixQ),
+                  ggaFresh ? "" : " (stale)",
+                  g_prov==PROV_DONE?"done":g_prov==PROV_GAVEUP?"gaveup":"wait");
     lastPrint = now;
   }
 
