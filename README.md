@@ -71,7 +71,7 @@ Atom の Grove(HY2.0) → mosaic COM1。**両側とも 3.3V LVTTL なので、�
    → **実機の P3H はこれ**。数秒で RTK-FIX。
 2. **GGA が来ない＝未設定（工場出荷など）** → COM1 の Septentrio コマンドで自己構成：
    - `setCOMSettings, COM2, baud<com2_baud>` → `setNMEAOutput, Stream1, COM2, <com2_nmea>, sec1`（トラクタ）
-   - `setNMEAOutput, Stream2, COM1, GGA, sec1`（Atom の fix-LED 用）
+   - `setNMEAOutput, Stream2, COM1, GGA+GSA+GSV, sec1`（Atom の fix-LED＋skyplot 用）
    `$R:` ack までリトライ、~30s で諦めて転送（ベストエフォート）。
 
 > ⚠ **重要な実機知見（結論）**：この P3H は、Atom が使う共有 UART（RTCM3 入力＋GGA 出力が
@@ -108,9 +108,19 @@ pio device monitor      # 115200
 ここで）。押さなければ保存済みで自動接続。
 
 **Web UI（液晶が無いのでこれが主 UI）**：STA 接続後、**http://ntrip-rover.local/**
-（または表示された IP）で稼働中に**設定変更＋監視**ができる。実機確認済み：
-- ライブ status（WiFi/RSSI、NTRIP 接続、RTCM バイト数、**fix 品質**、プロビジョニング
-  状態 `Prov`（done/waiting/gave up）、稼働時間）を 2 秒毎更新
+（または表示された IP）で稼働中に**設定変更＋監視**ができる。RTKLIB/PocketSDR の
+モニタ風に、上から **status → skyplot → C/N0 バー → NTRIP 設定** の一画面。2 秒毎更新。
+実機確認済み：
+- **status**：WiFi/RSSI、NTRIP 接続、RTCM バイト数＋**スループット(B/s)**、fix 品質、
+  **使用/可視衛星数**、age-of-correction、**HDOP/PDOP/VDOP**、緯度経度/UTC、
+  **セッション統計**（NTRIP/WiFi 断回数、TTFF、RTK-fix 時間率 %）、プロビジョニング
+  状態 `Prov`、稼働時間
+- **skyplot**：可視衛星を方位/仰角でプロット（星座別に色分け G/R/E/J/C/I/S）
+- **C/N0 バー**：衛星別の信号強度 (dB-Hz)、星座別に色分け＋凡例
+  > ⚠ skyplot / C/N0 / DOP は **COM1 に GSV/GSA が来ている時だけ**描画される。GGA しか
+  > 出していない受信機では `no GSV — enable GGA+GSV on COM1` と表示される。有効化は
+  > 下記「受信機を USB で設定する」の COM1 NMEA を `GGA+GSA+GSV` にするだけ（帯域は
+  > COM1@115200 で問題なし）。status の fix/位置/バイト数は GGA だけでも出る。
 - NTRIP ホスト/ポート/マウント/ユーザ/パスを変更→**Save & apply**（NVS 保存＋NTRIP を
   ホット再接続、再起動不要）。別現場・別基準局へ焼き直し無しで移動可
 - Reboot / Forget WiFi（ポータルへ）ボタン
@@ -147,7 +157,7 @@ mosaic-go を PC の USB に挿すと 2つの CDC ポートが出る（`/dev/tty
 ```
 # COM1 = Atom（RTCM3 入力＋LED 用 GGA 出力, 115200）
 setDataInOut,   COM1, auto                     # 入力を auto（RTCM3＋コマンド）
-setNMEAOutput,  Stream1, COM1, GGA, sec1        # GGA を Atom へ
+setNMEAOutput,  Stream1, COM1, GGA+GSA+GSV, sec1  # GGA(fix/LED)＋GSA(DOP)＋GSV(skyplot) を Atom へ
 # COM2 = トラクタ（GGA 出力, 38400）
 setNMEAOutput,  Stream2, COM2, GGA, sec1
 setCOMSettings, COM2, baud38400
