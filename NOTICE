@@ -1,0 +1,10 @@
+ntripclient_G5-P3H
+Copyright (c) 2026 yasunorioi
+Licensed under the MIT License (see LICENSE).
+
+Third-party dependency
+----------------------
+This sketch depends on NTRIP-client-for-Arduino
+(https://github.com/yasunorioi/NTRIP-client-for-Arduino), licensed under the
+GNU LGPL-3.0. It is referenced unmodified via PlatformIO lib_deps and retains
+its own license.

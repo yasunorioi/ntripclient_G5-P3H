@@ -19,10 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-This sketch depends on NTRIP-client-for-Arduino
-(https://github.com/yasunorioi/NTRIP-client-for-Arduino), which is licensed
-under the GNU LGPL-3.0. It is referenced unmodified via PlatformIO lib_deps
-and retains its own license.
