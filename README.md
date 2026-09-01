@@ -17,6 +17,7 @@ Atom はヘッドレスの純フォワーダ（表示・cut/fill は持たない
      │  RTCM3 over WiFi (NTRIP)
      ▼
  M5Atom Lite ── Grove UART G26/G32 (3.3V TTL) ──►  mosaic-go COM1  (RTCM3 IN → RTK fixed)
+             ◄── NMEA GGA (fix 状態・LED 用) ──   mosaic-go COM1
 
  mosaic-go COM2 ──► NMEA GGA @38400 ──► トラクタ・ガイダンス   (mosaic が直接出力・Atom は非関与)
 ```
@@ -108,7 +109,8 @@ pio device monitor      # 115200
 
 **Web UI（液晶が無いのでこれが主 UI）**：STA 接続後、**http://ntrip-rover.local/**
 （または表示された IP）で稼働中に**設定変更＋監視**ができる。実機確認済み：
-- ライブ status（WiFi/RSSI、NTRIP 接続、RTCM バイト数、**fix 品質**、稼働時間）を 2 秒毎更新
+- ライブ status（WiFi/RSSI、NTRIP 接続、RTCM バイト数、**fix 品質**、プロビジョニング
+  状態 `Prov`（done/waiting/gave up）、稼働時間）を 2 秒毎更新
 - NTRIP ホスト/ポート/マウント/ユーザ/パスを変更→**Save & apply**（NVS 保存＋NTRIP を
   ホット再接続、再起動不要）。別現場・別基準局へ焼き直し無しで移動可
 - Reboot / Forget WiFi（ポータルへ）ボタン
@@ -120,19 +122,21 @@ pio device monitor      # 115200
 
 ## LED
 
-fix 状態は mosaic COM1 から返る GGA を読んで色分けする。
+稼働状態を色分けする（上ほど優先＝起動〜WiFi〜プロビジョニングを先に、解決後に fix 品質）。
+fix 品質は mosaic COM1 から返る GGA を読んで判定する。
 
 | 色 | 意味 |
 |---|---|
-| 青 | 設定ポータル |
-| 黄 | WiFi 接続中 |
+| 赤 | 起動直後（初期化中・一瞬） |
+| 青 | 設定ポータル（ボタン長押し） |
+| 黄 | WiFi 接続中 / 再接続中（断が3分続くと再起動） |
+| アンバー（濃橙） | 受信機プロビジョニング解決待ち（RTCM3 転送を保留中） |
 | マゼンタ | NTRIP 接続中 |
-| **緑** | **RTK fixed**（GGA quality=4） |
-| シアン | RTK float（quality=5） |
-| 橙 | 補正は流れているが未 fix（DGPS/GPS/なし） |
-| 薄白 | GGA まだ来ず（fix 不明） |
 | レインボー | 補正ストール（>5s RTCM3 途絶） |
-| 赤 | 起動直後 / WiFi 断（3分で再起動） |
+| 薄白 | GGA まだ来ず（fix 不明） |
+| 橙 | 補正は流れているが未 fix（DGPS/GPS/なし） |
+| シアン | RTK float（quality=5） |
+| **緑** | **RTK fixed**（GGA quality=4） |
 
 ## 受信機を USB で設定する（確実な方法）
 

@@ -21,15 +21,18 @@
  *    Atom G26 (TX) ──► mosaic COM1 RX      Atom G32 (RX) ◄── mosaic COM1 TX      GND──GND
  *  If no fix / no GGA, suspect G26/G32 swapped.
  *
- *  mosaic-go setup: NONE by hand. The Atom self-provisions the receiver on boot
- *  (setNMEAOutput on COM1 for the LED + COM2 @38400 for the tractor), re-applied
- *  every power-up (current config, like tab5-caster) — a factory receiver works
- *  out of the box. Assumes COM1 is at its 115200 default. RTCM3 fed to COM1 is
- *  auto-used as corrections. Set PROVISION_MOSAIC 0 to disable.
+ *  mosaic-go setup: best-effort self-provisioning on boot. If the receiver is
+ *  already streaming GGA (saved boot config), the Atom just forwards. Otherwise it
+ *  tries the Septentrio command channel on COM1 (setNMEAOutput COM1 GGA for the LED
+ *  + COM2 @ configured baud for the tractor) during the pre-RTK quiet window.
+ *  NOTE(hardware): the user's P3H is RTCMv3-only on COM1 and IGNORES ASCII commands
+ *  on the shared RTCM+GGA UART — so on that unit self-provisioning no-acks and it
+ *  runs off a boot config saved via USB/RxTools (see README). Assumes COM1 @115200.
+ *  RTCM3 fed to COM1 is auto-used as corrections. Set PROVISION_MOSAIC 0 to disable.
  *
- *  LED: blue=portal, yellow=WiFi connecting, magenta=NTRIP connecting,
- *       GREEN=RTK fixed, CYAN=RTK float, ORANGE=corrections flowing but not fixed,
- *       rainbow=corrections stalled, red=offline (pre-reboot).
+ *  LED: red=starting, blue=portal, yellow=WiFi (re)connecting, amber=provisioning,
+ *       magenta=NTRIP connecting, rainbow=corrections stalled, dim-white=no GGA yet,
+ *       ORANGE=corrections flowing but not fixed, CYAN=RTK float, GREEN=RTK fixed.
  */
 #include <M5Unified.h>
 #include <WiFi.h>
