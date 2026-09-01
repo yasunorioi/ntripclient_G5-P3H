@@ -166,4 +166,9 @@ getNMEAOutput / getCOMSettings / getDataInOut / getSBFOutput
 ## 流用元
 
 - [NTRIP-client-for-Arduino](https://github.com/yasunorioi/NTRIP-client-for-Arduino)
-  （`NTRIPClient` ライブラリ＝ lib_deps で参照）。GLAY-AK2 版の fork。
+  （`NTRIPClient` ライブラリ＝ lib_deps で参照）。GLAY-AK2 版の fork、LGPL-3.0。
+
+## ライセンス
+
+本スケッチは **MIT**（[LICENSE](LICENSE)）。依存する `NTRIPClient` ライブラリは
+**LGPL-3.0** のまま（lib_deps で未改変参照）。
