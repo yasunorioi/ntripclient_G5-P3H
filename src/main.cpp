@@ -20,6 +20,7 @@
 void setup() {
   NtripRover::Options o;
   o.board   = "G5-P3H";
+  o.version = "1.0.0";
   o.atomCom = "COM1";        // Atom Grove is wired to mosaic COM1 on the P3H
   // Pins 26/32 @115200 and the NTRIP defaults (rtk.toiso.fit:2101/eniwa-bd982) are
   // already the core defaults, so nothing else to set.
